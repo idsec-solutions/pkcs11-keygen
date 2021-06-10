@@ -30,10 +30,10 @@
 usage() {
     echo "Usage: $0 [options...]" >&2
     echo
-    echo "   -p, --passwd           Password for HSM slot"
+    echo "   -p, --passwd           Password for HSM slot (will be prompted for if not given)"
     echo "   -s, --slot             Slot ID (Not slot index) as decimal or hex integer, for the HSM slot. Hex identifiers starts with '0x'."
     echo "   -a, --alias            The alias of the generated key"
-    echo "   -m, --module           PKCS11 .so lirary file path (default is /usr/lib/softhsm/libsofthsm2.so)"
+    echo "   -m, --module           PKCS11 .so library file path (default can be defined by environment variable PKCS11_MODULE)"
     echo "   -i, --kid              Integer or hex key identifier (default is random generated)"
     echo "   -d, --dn               Certificate subject dn (default is CN=(--alias)"
     echo "       --key-type         Key type (default is EC:secp256r1)"
@@ -43,6 +43,11 @@ usage() {
     echo "                          is done per slot (not per key). No key generation if this option is selected"
     echo "       --list             Show a list of available slots - No key generation"
     echo "   -h, --help             Prints this help"
+    echo
+    echo "Environment variables"
+    echo "   PKCS11_MODULE         Defines a default PKCS11 HSM library file location if not set by the -m or --module parameter"
+    echo "   LIBPKCS11             Modifies the location of the OpenSSL PKCS11 library file used for OpenSSL integration"
+    echo "                         If not set, this location defaults to /usr/lib/x86_64-linux-gnu/engines-1.1/libpkcs11.so"
     echo
 }
 
@@ -62,6 +67,8 @@ VALID_DAYS=""
 LIST=false
 PROVIDER_NAME=""
 PROVIDER_CONFIG=false
+
+LIBPKCS11_LOCATION="/usr/lib/x86_64-linux-gnu/engines-1.1/libpkcs11.so"
 
 while :
 do
@@ -130,8 +137,19 @@ do
     esac
 done
 
+if [ ! "$LIBPKCS11" == "" ]; then
+    LIBPKCS11_LOCATION=$LIBPKCS11
+    echo "Using libpkcs11.so location set by ENV variable LIBPKCS11 to $LIBPKCS11_LOCATION"
+fi
+
 if [ "$MODULE" == "" ]; then
-    MODULE=/usr/lib/softhsm/libsofthsm2.so
+    if [ "$PKCS11_MODULE" == "" ]; then
+      echo "Error: No PKCS11 module is provided" >&2
+      usage
+      exit 1
+    else
+      MODULE=$PKCS11_MODULE
+    fi
     echo "Module not given, defaulting to $MODULE" >&1
 fi
 if [ "$LIST" == true ]; then
@@ -159,9 +177,9 @@ EOF
     exit 0
 fi
 if [ "${PASSWD}" == "" ]; then
-    echo "Error: Missing HSM slot password" >&2
-    usage
-    exit 1
+    echo -n "HSM SLOT pin: "
+    read -rs PASSWD
+    echo
 fi
 if [ "$ALIAS" == "" ]; then
     echo "Error: Missing HSM key alias" >&2
@@ -220,7 +238,7 @@ pkcs11 = pkcs11_section
 
 [pkcs11_section]
 engine_id = pkcs11
-dynamic_path = /usr/lib/x86_64-linux-gnu/engines-1.1/libpkcs11.so
+dynamic_path = $LIBPKCS11_LOCATION
 MODULE_PATH = $MODULE
 EOF
 
@@ -236,7 +254,7 @@ EOF
 #
 
 echo "Generating key of type $KEY_TYPE with id=$KID and alias=$ALIAS"
-pkcs11-tool --module $MODULE --slot $SLOT --login -p $PASSWD --keypairgen --id $((KID)) --label $ALIAS --key-type $KEY_TYPE
+pkcs11-tool --module $MODULE --slot $SLOT --login -p ${PASSWD} --keypairgen --id $((KID)) --label $ALIAS --key-type $KEY_TYPE
 
 #
 # Generating certificate
@@ -249,7 +267,7 @@ OPENSSL_CONF=target/p11-openssl.cfg openssl req -x509 -new \
     -engine pkcs11 \
     -keyform engine \
     -key ${KEY_ID} \
-    -passin pass:${PASSWD} \
+    -passin "pass:${PASSWD}" \
     -${HASH} \
     -config target/cert.cfg \
     -subj "${DN}" \
@@ -257,7 +275,7 @@ OPENSSL_CONF=target/p11-openssl.cfg openssl req -x509 -new \
     -out "${ALIAS}.crt"
 
 echo "Uploading certificate to HSM"
-pkcs11-tool --module $MODULE --slot $SLOT --login -p $PASSWD -w ${ALIAS}.crt -y cert --label $ALIAS --id $((KID))
+pkcs11-tool --module $MODULE --slot $SLOT --login -p ${PASSWD} -w ${ALIAS}.crt -y cert --label $ALIAS --id $((KID))
 rm -rf "target"
 
 #
@@ -269,4 +287,3 @@ echo "     Keys in slot after key generation"
 echo "********************************************"
 pkcs11-tool --module $MODULE --slot $SLOT -O
 echo "Done"
-
